@@ -1,10 +1,12 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -38,19 +40,12 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "Invalid request body", err)
 	}
 
-	file, header, err := r.FormFile("thumbnail")
+	thumbMultiFile, thumbHeader, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid request body", err)
 		return
 	}
-
-	//Read image data
-	data := make([]byte, header.Size)
-	data, err = io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid request body", err)
-		return
-	}
+	defer thumbMultiFile.Close()
 
 	//Gat video metadata from database
 	video, err := cfg.db.GetVideo(videoID)
@@ -60,14 +55,42 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	if video.UserID != userID {
 		respondWithError(w, http.StatusUnauthorized, "Access denied", nil)
+
+		return
 	}
 
-	//Update video metadata in database with thumbnail IMG stored as a data URL encoded in base 64
-	url := fmt.Sprintf("data:image;base64,%s", base64.StdEncoding.EncodeToString(data))
-	video.ThumbnailURL = &url
+	//add thumbnail to assets folder from multipart.file
+	//get Image file type
+	partsThumbHeader := strings.Split(thumbHeader.Header.Get("Content-Type"), "/")
+	if len(partsThumbHeader) < 2 {
+		respondWithError(w, http.StatusBadRequest, "Invalid Content Type header", nil)
+		return
+	} else if partsThumbHeader[0] != "image" {
+		respondWithError(w, http.StatusBadRequest, "Not Image Type", nil)
+		return
+	}
+
+	//Create file in assets folder and write image data to it
+	thumbUrlPath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", video.ID, partsThumbHeader[1]))
+	thumbFile, err := os.Create(thumbUrlPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating video file", err)
+		return
+	}
+	defer thumbFile.Close()
+
+	_, err = io.Copy(thumbFile, thumbMultiFile)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error writing video file", err)
+	}
+
+	//Update video thumbnail URL in database and respond with thumbnail URL
+	thumbURL := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, video.ID, partsThumbHeader[1])
+	video.ThumbnailURL = &thumbURL
 
 	if err = cfg.db.UpdateVideo(video); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error updating video metadata", err)
+		return
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
